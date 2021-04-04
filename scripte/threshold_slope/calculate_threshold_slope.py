@@ -1,240 +1,399 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Fri Nov  6 08:04:04 2020
+Created on Thu Mar  4 09:56:35 2021
 
 @author: konrad
 """
-
-import os
 import pandas as pd
-import scipy.stats
-from scipy.optimize import curve_fit
 from matplotlib import pyplot as plt
+import ast
+from scipy.optimize import curve_fit
 import numpy as np
+from sklearn.linear_model import LinearRegression
 
-# calculate threshold slope data for experiments
-def load_df(fn, list_cols=['yieldreduction_list','salinitylevel_list']):
+
+
+
+
+# objective function
+def objective(x, a, b, c):
+	return a * x + b
+
+def threshold_slope(x,a,b):
     '''
-    Load a csv file to a pandas DataFrame. Calculate a new column containing
-    values for max yield reduction based on salinity and yield reduction list columns
-    also clears and split columnnames to get the names right
-    and drop nan values
+    orginal formula from vangenuchten:
+        
+    Yr= 1 - b*(C-Ct) at Ct < C < C0
     
-    input:
-        fn = filename of csv file
-        list_cols= definition of two columns containg 1st lists of 
-        yield reduction values and 2nd list of salinity levels (must have same n)
-    output:
-        pd.DataFrame 
+    Yr= relative yield
+    b = absolute value of declining slope in Yr with C
+    Ct = maximimum value of salinity without a yield reduction
+    C0 = lowest value of C where Yr = 0
     
+
+    Parameters
+    ----------
+    x : irrigation water salinity (C).
+    a : slope of declining yield (b)
+    b : breakpoint point of highest salinty where yield is still 100%. (Ct)
+
+    Returns
+    -------
+    relative yield in dependency of irrigation water salinty.
+
+
+
+    '''
+    return 1 -a*(x-b)
+
+
+
+# fit curve
+
+def simple_fit(function,xvals,yvals):
+    '''
+    given linear function and x and y valus this function returns the otimal
+    parameters (popt) and ther estimated covariance (pcov) on the base of
+    scipy.optimize.curve_fit
+    
+    Parameters
+    ----------
+    function : objectiv function. python function expected
+    xvals : array like series of x values
+    yvals : array like series of y values
+
+    Returns
+    -------
+    popt,pcov
+
     '''
     
+    return curve_fit(threshold_slope,xvals,yvals)
+
+
+
+
+def get_simple_fit_values(function,x_array, popt):
+    '''
+    return array like series of y values based on a function and a series of 
+    x values
+
+    Parameters
+    ----------
+    function :  objectiv function. python function expected
     
-    # load excelcsv file to a pandas dataframe
-    df = pd.read_csv(fn,delimiter=';',encoding='latin1')
+    x_array: gereated array of data for x
+    
+    popt :  the optimal
+    parameters of a curve_fit function (popt).
+
+    Returns
+    -------
+    None.
+
+    '''
+    a,b = popt
+    
+    return function(x_array,a,b)
+
+
+def linearfit_uncentered(x_values,y_values):
+    '''
+    account for the problem that the breakpoint b is zero or negative. 
+    In such cases we have to adjust the calibration to ensure that every fitted 
+    regression starts at least at (1|0) following this stackoverflow post:
+    https://stackoverflow.com/questions/58531601/linear-fit-constrained-to-go-through-the-first-point-in-python
     
     
-    # covert liststring columns to real python lists
-    for colname in list_cols:
-        df[colname] = df[colname].str.replace(']',"")
-        df[colname] = df[colname].str.replace('[',"")
-        df[colname] = df[colname].str.split(',')
+    if first y value is less than 1 we dont aplly piecewise but linear fit centered on (1|0)'''
+    
+    x_values = np.array(x_values)
+    
+    y_values = np.array(y_values)
+    
+    
+    lm = LinearRegression(fit_intercept = False)
+    
+    # center data on x_values[0], y_values[0]
+    y_values2 = y_values - y_values[0]
+    x_values2 = x_values - x_values[0]
+    
+    # fit model
+    lm.fit(x_values2.reshape(-1, 1), y_values2)
+    # predict line
+    preds = lm.predict(np.arange(0, 40, 0.1).reshape(-1,1))
+    
+
+    # add x_0 and y_0 back to the predictions
+    new_x_values= np.arange(0,40, 0.1) + x_values[0]
+    new_y_values= preds  + y_values[0]
+    
+    
+    
+    return new_x_values[new_y_values>0],new_y_values[new_y_values>0]
+    
+
+
+def piecewise(x,a,b):
+    '''
+    
+
+    Parameters
+    ----------
+    x : irrigation water salinity (C).
+    
+    a : slope of declining yield (b)
+    
+    b : breakpoint point of highest salinty where yield is still 100%. (Ct)
+
+    Returns
+    -------
+    series of y values (values for relative yield) based on given x values
+
+    '''
+
+#    print(x,a,b)
+#    if b < 0:
+#        print(type(x),'to low!')
+        
+    # return np.piecewise(x , [x <= b, b<x], [lambda x:1, lambda x: 1-1*a*(x-b)])
+    return np.piecewise(x , [x <= b, b<x], [lambda x:1, lambda x: 1-1*a*(x-b)])
+
+def estimate_breakpoint(function,x_values,y_values,repetitions=5000):
+    '''
+    
+
+    Parameters
+    ----------
+    function : TYPE
+        DESCRIPTION.
+    x_values : TYPE
+        DESCRIPTION.
+    y_values : TYPE
+        DESCRIPTION.
+    repetitions : Number of repitition for breakpoint estimation. The default is 40000.
+
+    Returns
+    -------
+    p_best : TYPE
+        DESCRIPTION.
+    sqerror : TYPE
+        DESCRIPTION.
+
+    '''
+
+    
+    # satring variable for optimization process. Storing the minimal 
+    # estimatetd error. Starting in inf to make it bigger the maximum 
+    # error.
+#    sqerror_min = np.inf
+#    # variable for the best estimated parameterset
+#    p_best = None
+#    for iteration in range(repetitions):
+#            
+    #
+#    a_initial = (np.random.rand(1)*10)[0]
+#    
+#    #initialk parametergues for breakpoint
+#    b_initial = (np.random.rand(1)*25)[0]
+#    
+    
+    # fit curve piecwise using initial gusses
+    popt,pcov = curve_fit(piecewise,x_values,y_values)#,
+                     #      p0=(a_initial,b_initial))
+    
+    # claculate the sum squared error between calculated and measured data
+    sqerror = np.nanmean((y_values - piecewise(x_values, *popt))**2)
+    
+    # check if guessed error is below the best rum. if so replace best run 
+    # with actual parameters
+#        if(sqerror < sqerror_min):
+#            sqerror_min = sqerror
+#            p_best = popt
+#        
+#            print(' guess: ',iteration,
+#                   ' perr_min: ',sqerror_min,' a_initial: ',a_initial,
+#                   ' b_initial: ',b_initial)                
+#            print('pbest_tmp: ',p_best)
 
         
-    # drop all rows in df containing nans in columns selected by list cols
-    df = df.dropna(subset=list_cols)
-    # take the "list od list" including str and float values and access the values of the list
-    # to get the last object --> 'max_yieldreduction'
-
-    df['max_yieldreduction'] = [float(i[-1]) for i in df.yieldreduction_list]
-    
-    # data is a list of strings, we have to convert to list of floats
-    for colname in list_cols:
-        l=[]
-        for i in df[colname]:
-            l.append([float(x) for x in i])
-        df[colname] = l
+    return popt,sqerror
         
-    df['crop_variety']= rename(df['crop_variety'])   
-    df=df.set_index(df['crop_variety'])
-    return df 
+def calc_xy_values(x_values,y_values,x_out=np.linspace(0,15,num=100),
+                      function=threshold_slope,method=simple_fit,linearfit_uncentered=False):
+    '''
+    take two lists of x and y values. apply the simple_fit using the given 
+    objective function (threshold_slope)
+    also generate series of new x values for claculation (x_out, can be changed)
 
- 
-def rename(column_name):
-    '''
-    check column and if a names is duplicated add a number to it
-    this way we cann get unique index by having duoplicated names
+    Parameters
+    ----------
+    x_values : list of irrigation water salinity values.
     
-    takes:
-        a pandas dataframe column, checks for duplicate strings and if found
-    adds a number to it to make it unique
+    y_values : list of relative yield values.
+        DESCRIPTION.
+    x_out : np array of values. The default is np.linspace(0,15,num=250).
     
-    returns: a list containing renamed items in previous given order
+    function : objective function for the fitting can be changed here.
+    The default is threshold_slope.
     
-    '''
-    result = []
-    for fname in column_name.values:
-        orig = fname
-        i=1
-        while fname in result:
-            fname = orig + str(i)
-            i += 1
-        result.append(fname)
-    return result    
+    method: method used for fitting(simple fit or estimate_breakpoint)
     
 
-def piecewise(x,x0,x1,y0):
-    '''
-    piecewise function according to Stepphun et al 2005. Root zone salinity
-    called Threshold slope function
-    
-    input: 
-        x: list of x values
-        x0,x1,y0 parameters of function
-    
-    output:
-        np.array containing results of calculation
-    '''
-#    also applies little 'crack' to avoid sudden drops of the graph because of 
-#    the problem if x1 > x where it should not be
-    if x[-1] > x1:
-        x1=x[-1]
-    pw = np.piecewise(x , [x <= x0, np.logical_and(x0<x, x<=x1), x>=x1] , 
-                             [lambda x:1, lambda x: 1-1*y0*(x-x0), lambda x: -5])
-#    print(pw)
-    return pw
+    Returns
+    -------
+    two arrays of same length, first x_out and second for every value in x_out 
+    the corresponding calculated value for y_out
 
+    '''
+    popt_simple,pcov = method(function, x_values, y_values)
 
-def get_threshold_slope_salipa(df,savefig=True,calculate_params=True,ts_parameter = 40000):
-    '''
-    create linear regressions for inserted datzabase values based on the threshold slope model
     
-    returns pd.dataframe
-    '''
-    
-#    https://datascience.stackexchange.com/questions/8457/python-library-for-segmented-regression-a-k-a-piecewise-regression
-    
-    crop_type = str(df.crop_type.values)
-    
-    ECe=[]
-    res=[]
-    
-    for i in df.index:
-    # ger x and y data
-        x = df.salinitylevel_list[df.index == i].values[0]
-        y = df.yieldreduction_list[df.index == i].values[0] #convert from percetage to fraction
         
-        x=np.asarray(x)
-        print(x)
-#        print(np.asarray(y))
-        y=np.asarray(y)*0.01
-        print(y)
-        crop = df.crop_variety.loc[df.index == i][i]
-        crop_type = df.crop_type.loc[df.index == i][i]
-
-        perr_min = np.inf
-        p_best = None
         
-        if calculate_params:
-            for n in range(ts_parameter):
-                k = np.random.rand(3)*50
-                # 
-                p , e = curve_fit(piecewise, x, y,bounds=((0,0,0), (np.inf,np.inf,np.inf)),p0=k,maxfev=ts_parameter)
-                perr = np.sum((np.abs(y-piecewise(x, *p)))**2)
-                if(perr < perr_min):
-                    perr_min = perr
-                    p_best = p
-    #                print(p_best,'n: ',n)
-            xd = np.linspace(0, max(x)+6, 10000)
-            print(str(crop)+str(p_best))
-            x0 = p_best[0]
-            x1 = p_best[1]
-            y0 = p_best[2]
+    return x_out,get_simple_fit_values(function,x_out,popt_simple)
+
+
+
+
+def fit_and_plot(x_values,y_values,crop_variety):
+    
+       #fit for simple linear model
+    x_simple,y_simple= calc_xy_values(x_values,y_values,function=threshold_slope,
+                                      method=simple_fit)
+    # print(x_simple,y_simple)
+    
+    #fit piecewise
+    x_piecewise,y_piecewise = calc_xy_values(x_values,y_values,function= piecewise, 
+                                             method=simple_fit)
+    # print(x_piecewise,y_piecewise)
+    
+    #fit breakpoint
+    x_bp,y_bp = calc_xy_values(x_values,y_values,function= piecewise,
+                               method=estimate_breakpoint)
+    
+    if y_bp[0] < 1:
+        x_bp,y_bp=linearfit_uncentered(x_values,y_values)
         
-        else:
-            x0 = df['x0']
-            x1 = df['x1']
-            y0 = df['y0']
-#        y_fao_list = get_piecewise_ec_by_yr(fao_ec_list,x0,x1,y0)
-        r_square = np.corrcoef(y, piecewise(x, *p_best))[0, 1] ** 2
-        rmse = scipy.sqrt(sum((y-piecewise(x, *p_best))**2)/len(piecewise(x, *p_best)))
-        print(("Threshold Slope  linear r2:%.2f   rmse:%.2f") % (r_square,rmse))
-        res.append([crop,crop_type,r_square,rmse,x0,x1,y0])
-#        ECe.append(y_fao_list)
+    # plot the data
+    ax = plt.gca()
+    ax.scatter(x_values,y_values,color='r')
+#    ax.plot(x_simple,y_simple,color='b')
+#    ax.plot(x_piecewise,y_piecewise,color='k')
+    ax.plot(x_bp,y_bp,color='g')
+    plt.title(crop_variety)
+    plt.show()
+    plt.close()
 
+def xy_crop_from_data(fn='problems.csv'):
+    
+    data = pd.read_csv(fn,sep=',')
+    
+    for i in data.index:
+        x_values= ast.literal_eval(data.salinitylevel_list.loc[i])
+        y_values= ast.literal_eval(data.yieldreduction_list.loc[i])
+        y_values = [value*.01 for value in y_values]
+        crop_variety = data.crop_variety.loc[i]
         
-        if savefig:
-            plot=plot_piecewise(p_best,xd,x,y,r_square,rmse,savefig=savefig,Name=crop_type+'_'+str(ts_parameter)+'_'+str(df.loc[i].crop_variety))
-    res=pd.DataFrame(res,columns=['crop','crop_type','r²','rmse','x0','x1','y0'])
-#    df= pd.DataFrame(ECe,columns=['EC_100','EC_97','EC_90','EC_75','EC_50','EC_10','EC_0'])
+        
+        fit_and_plot(x_values,y_values,crop_variety)
+        
+        
+
+
+
+
+
+
+#     get crop_variations xy data from data
     
-#    df = pd.concat([res,df],axis=1)
-    df=df.set_index(['crop'])
-    return res    
-
-
-# plotting
-
-def makeFig(w=10,h=4,fontsize=8.):
-    plt.rcParams['font.size'] = fontsize
-    plt.rcParams['font.family'] = 'sans-serif'
-    plt.rcParams['font.serif'] = 'Times'
-    plt.rcParams['font.cursive'] = 'Apple Chancery'
-    plt.rcParams['axes.labelsize'] = fontsize
-    plt.rcParams['xtick.labelsize'] =fontsize
-    plt.rcParams['ytick.labelsize'] = fontsize  
-    fig = plt.figure(frameon=False)
-    fig.set_facecolor('white') 
-    #DefaultSize = fig.get_size_inches()
-    #fig.set_size_inches( (DefaultSize[0]*.7, DefaultSize[1]*1) )
-    fig.set_size_inches(w,h)
-    return fig  
+#     get crop_variations simple linear model
     
-def plot_piecewise(p_best,xd,x,y,r_square,rmse,savefig=True,Name='Name'):
-    '''
-    create a plot for threshold slope calculations
-    '''
-    y_out = piecewise(xd, *p_best)
-    xlen = int(round(x.max()) + 6)
-    fig = makeFig(w=5,h=5,fontsize=12.)
-    ax1 = fig.add_subplot(111)
-    ax1.set_xlim(0, xlen)
-    ax1.set_ylim(0, 1.05)
-    ax1.set_xticks(range(0, xlen))
-    ax1.set_xticklabels([str(i) for i in range(0,xlen)])
-    ax1.set_yticks(np.arange(0,1.01,0.1))
-    ax1.set_yticklabels([str(round(i,2)) for i in np.arange(0,1.01,0.1)])
+#     get crop_variations threshold slope model
+
+#     get crop_variations breakpoint estimation model
     
-    ax1.plot(x,y,label='Observed', marker='o',color="k",linestyle="none")
-    ax1.plot(xd, y_out, 'r-',ls='--', 
-             label=("Threshold Slope $r²$:%.2f, $rmse$:%.2f") % (r_square,rmse))
-    #    ax1.plot(EC_list,Yr_list,c=color,linestyle=ls)
-    ax1.scatter(x,y)
+#     plot all variations in one plots
     
-    # desingn
-    ax1.set_xlabel('Salinity $dS \ m^{-1}$')
-    ax1.set_ylabel('Yield reduction [-]')
-    ax1.get_xaxis().tick_bottom()
-    ax1.get_yaxis().tick_left()
-    ax1.spines['top'].set_visible(False)
-    ax1.spines['right'].set_visible(False)
-    ax1.set_title(Name)
-    ax1.legend(ncol=1,fontsize=7,loc='lower left',bbox_to_anchor=[.01, 0.01]).draw_frame(False)
-    plt.figure(figsize=(5,5))
-    if savefig:
-        fig.savefig("/home/konrad/Nextcloud/salzpaper/scripte/threshold_slope/testcase_problems/Fig/"+Name+'.png')
-    plt.close('all')
-    return df
+#     create giant subplot. caluclate gridsize based on lenght of data
+    
+    
+xy_crop_from_data(fn='problems.csv')
+
+# # load pbest data
+# data = pd.read_csv('problems.csv', sep=',')
+
+# # X data. (independent) lists of irrigation water salinity values in ds/M 
+# x_values=data.salinitylevel_list.apply(lambda x: ast.literal_eval(x))
 
 
-# problem ids:
-#problems = [13,60,65,66,67,72,73,80,85,88,100,110,121]
-problems = [121]
-#
-df = load_df('/home/konrad/Nextcloud/salzpaper/data/salipa_db2018_KB.csv')
+# x_values=x_values[1]
 
-df = df.loc[df['index'].isin(problems)]
+# #Y Data (dependend). lists of values for relative yield
+# y_values=data.yieldreduction_list.apply(lambda x: ast.literal_eval(x))
+# # every item in every list gets converted from % to fraction
+# y_values = y_values.apply(lambda x: [i*.01 for i in x])
+# y_values=y_values[1]
 
 
-df_ts= get_threshold_slope_salipa(df)
+
+# #fit for simple linear model
+# x_simple,y_simple= calc_xy_values(x_values,y_values,function=threshold_slope,
+#                                   method=simple_fit)
+
+
+# #fit piecewise
+# x_piecewise,y_piecewise = calc_xy_values(x_values,y_values,function= piecewise, 
+#                                          method=simple_fit)
+
+
+# #fit breakpoint
+# x_bp,y_bp = calc_xy_values(x_values,y_values,function= piecewise,
+#                            method=estimate_breakpoint)
+
+
+
+
+
+
+
+
+
+    
+    
+
+#piecewise example
+
+# https://stackoverflow.com/questions/41641880/using-scipy-curve-fit-with-piecewise-function
+
+
+
+# curvefit initial guess ist p0. 
+# sollte immer guessen im bereich zwischen dem letzten x über 100 und dem ersten unter 100 und
+# einfach zwischen beiden werten in 0.1 schritten durch enumeraten und jedesmal den fehler messen und dann den besten nehmen
+
+
+
+# p0=array_like, optional
+
+#     Initial guess for the parameters (length N). If None, then the initial values will all be 1 (if the number of parameters for the function can be determined using introspection, otherwise a ValueError is raised).
+
+
+# do this tutorial:
+    # https://machinelearningmastery.com/curve-fitting-with-python/
+
+
+# plot simple regression
+
+# linear function
+# f = -1*m*x
+
+# scipy.optimize.curve_fit(f,X[0],Y[0])
+# check NNLS
+# https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.nnls.html
+# https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.lsq_linear.html#scipy.optimize.lsq_linear
+
+
+
+
